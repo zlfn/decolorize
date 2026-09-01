@@ -1,9 +1,9 @@
 //! Contrast preserving decolorization.
 //!
 //! Ordinary color-to-gray conversions map each color onto its luminance. Colors
-//! that differ only in chrominance therefore collapse onto the same gray, and
-//! the contrast between them is lost — the textbook example being red text on a
-//! green background, which becomes invisible.
+//! that differ only in chrominance collapse onto the same gray and the contrast
+//! between them is lost. Red text on a green background is the standard
+//! example: it comes out as a flat block.
 //!
 //! The functions in this module implement the *contrast preserving
 //! decolorization* (CPD) of Lu, Xu and Jia, which instead picks the global
@@ -23,10 +23,10 @@
 //! Both variants share the same objective. Write `Δg` for the difference of the
 //! output grays of a pixel pair and `δ` for the color contrast of that pair,
 //! measured as the Euclidean distance in CIELAB. Previous methods minimize
-//! `(Δg - δ)²`, which forces a *sign* on `δ` — usually the sign of the
-//! lightness difference. CPD observes that this sign carries no physical
-//! meaning, and lets the optimizer pick it: `Δg` is instead modeled as a
-//! mixture of two Gaussians centred at `+δ` and `-δ`,
+//! `(Δg - δ)²`, which forces a *sign* on `δ`, usually that of the lightness
+//! difference. CPD observes that this sign carries no physical meaning and lets
+//! the optimizer pick it. `Δg` is instead modeled as a mixture of two Gaussians
+//! centered at `+δ` and `-δ`,
 //!
 //! ```text
 //! E(ω) = - Σ  ln[ α·G(Δg - δ, σ²) + (1 - α)·G(Δg + δ, σ²) ]
@@ -38,19 +38,19 @@
 //!
 //! # Relation to `cv::decolor`
 //!
-//! OpenCV ships the authors' own implementation of the polynomial variant, and
-//! this module reproduces it: fitting both on the benchmark dataset from the
-//! project page and pinning the iteration count to the same value, the nine
-//! coefficients agree to within about 0.03.
+//! OpenCV ships the authors' own implementation of the polynomial variant. Run
+//! on the benchmark dataset from the project page with the iteration count
+//! pinned to the same value, its nine coefficients and this module's agree to
+//! within about 0.03.
 //!
-//! They differ in one deliberate respect. `cv::decolor` measures convergence
-//! with an energy that omits the weak order weights and reads `σ` where the
-//! rest of the algorithm reads `2σ²`, which makes the energy far smoother than
-//! the objective actually being minimized, so its default tolerance trips after
-//! about three iterations. This module evaluates the objective as published, so
-//! it keeps iterating and reproduces the coefficient trajectory tabulated in the
-//! paper. Contrast preservation over the benchmark is unaffected: mean CCPR at
-//! τ = 15 is 0.83 for both, against 0.73 for a luminance conversion.
+//! The defaults differ in one respect. `cv::decolor` measures convergence with
+//! an energy that omits the weak order weights and reads `σ` where the rest of
+//! the algorithm reads `2σ²`. That energy is much smoother than the objective
+//! being minimized, so its tolerance trips after about three iterations. This
+//! module evaluates the objective as published and keeps iterating, which
+//! reproduces the coefficient trajectory tabulated in the paper. Contrast
+//! preservation over the benchmark is unaffected: mean CCPR at τ = 15 is 0.83
+//! for both, against 0.73 for a luminance conversion.
 //!
 //! # References
 //!
@@ -178,9 +178,8 @@ pub struct DecolorizeOptions {
     /// reference implementation.
     pub sigma: f64,
     /// Maximum number of fixed point iterations, `kmax` in the paper, which
-    /// sets it to `15` empirically. The coefficients grow slowly and are still
-    /// drifting at that point for some images, so this acts as a budget rather
-    /// than a convergence criterion.
+    /// sets it to `15` empirically. Some images are still drifting at that
+    /// point, so this is a budget rather than a convergence criterion.
     pub max_iterations: usize,
     /// Iteration stops once the energy changes by less than this between
     /// successive iterations. Defaults to `1e-4`.
@@ -376,9 +375,9 @@ struct Planes {
 impl Planes {
     /// Box filters `image` down until `width + height <= max_extent`.
     ///
-    /// A box filter — rather than point sampling — matters here: the objective
-    /// is a sum over *neighboring* pixel pairs, and aliasing would fabricate
-    /// contrast between pairs that are not adjacent in the original.
+    /// Box filtering rather than point sampling matters here. The objective is
+    /// a sum over *neighboring* pixel pairs, so aliasing would fabricate
+    /// contrast between pixels that are not adjacent in the original.
     fn downscale<P>(image: &Image<P>, max_extent: u32) -> Self
     where
         P: Pixel,
@@ -465,9 +464,8 @@ impl Planes {
 /// Writes the difference `p(x) - p(y)` for every four-neighbor pixel pair into
 /// `out`, horizontal pairs first and vertical pairs second.
 ///
-/// All the per-pair vectors in this module — the color contrasts, the weak
-/// orders and the monomial differences — use this one ordering, so they can be
-/// indexed in lockstep.
+/// The color contrasts, the weak orders and the monomial differences all use
+/// this ordering, so they can be indexed in lockstep.
 fn pair_differences(plane: &[f64], width: usize, height: usize, out: &mut [f64]) {
     let horizontal = width.saturating_sub(1);
     for y in 0..height {
@@ -488,7 +486,7 @@ fn pair_differences(plane: &[f64], width: usize, height: usize, out: &mut [f64])
 
 /// Per-pair color contrast `|δ|`, the CIELAB distance of the pair scaled so
 /// that it is commensurate with a gray difference on the unit interval.
-fn colour_contrast(planes: &Planes) -> Vec<f64> {
+fn color_contrast(planes: &Planes) -> Vec<f64> {
     let pixels = planes.width * planes.height;
     let (mut lightness, mut green_red, mut blue_yellow) =
         (vec![0.0; pixels], vec![0.0; pixels], vec![0.0; pixels]);
@@ -521,9 +519,9 @@ const WEAK_ORDER_LEVEL: f64 = 0.05;
 /// in every channel, `-1` where it is dominated in every channel, and `0` where
 /// the order is ambiguous.
 ///
-/// This is `2α - 1` for the `α` of the paper: it selects the single-moded prior
-/// `G(±δ, σ²)` for the pairs that really are ordered, and leaves the mixture
-/// evenly weighted — free to choose a sign — everywhere else.
+/// This is `2α - 1` for the `α` of the paper. It selects the single-moded prior
+/// `G(±δ, σ²)` for the pairs that really are ordered and leaves the mixture
+/// evenly weighted, free to choose a sign, everywhere else.
 fn weak_order(planes: &Planes) -> Vec<f64> {
     let pairs = planes.pair_count();
     let (mut dr, mut dg, mut db) = (vec![0.0; pairs], vec![0.0; pairs], vec![0.0; pairs]);
@@ -625,16 +623,17 @@ fn accumulate_pairs(
         // α and 1 - α of Eq. (7), recovered from the weak order.
         let (positive, negative) = ((1.0 + order[i]) / 2.0, (1.0 - order[i]) / 2.0);
 
-        // With σ = 0.02 both Gaussians underflow for any pair whose contrast is
-        // badly reproduced, which is exactly where the objective is largest, so
-        // the mixture is evaluated in the log domain throughout.
+        // With σ = 0.02 both Gaussians underflow for any pair whose contrast
+        // is badly reproduced, which is where the objective is largest, so the
+        // mixture is evaluated in the log domain throughout.
         let low = positive.ln() - (difference - delta).powi(2) * scale;
         let high = negative.ln() - (difference + delta).powi(2) * scale;
         let peak = low.max(high);
         let (low, high) = ((low - peak).exp(), (high - peak).exp());
 
-        // 2β - 1, the signed mixture responsibility. One of the two exponentials
-        // is 1 by construction, so this quotient is always well conditioned.
+        // 2β - 1, the signed mixture responsibility. One of the two
+        // exponentials is 1 by construction, so the quotient is well
+        // conditioned.
         let responsibility = (low - high) / (low + high);
 
         acc.energy -= peak + (low + high).ln();
@@ -659,7 +658,7 @@ fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIA
         return weights;
     }
 
-    let contrast = colour_contrast(planes);
+    let contrast = color_contrast(planes);
     let order = weak_order(planes);
     let basis = monomial_differences(planes);
 
@@ -826,9 +825,7 @@ struct Pair {
 /// SplitMix64, used only to pair up the sampled pixels.
 ///
 /// A fixed generator rather than one from `rand` keeps the output of
-/// [`decolorize_fast_with`] reproducible across platforms and releases, which
-/// matters because the sampling is an implementation detail the caller cannot
-/// otherwise control.
+/// [`decolorize_fast_with`] reproducible across platforms and releases.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -854,8 +851,9 @@ where
     let equal_weights = [1.0 / 3.0; 3];
     let pairs = sample_pairs(image, options);
     if pairs.is_empty() {
-        // No pair carries enough contrast to discriminate between candidates —
-        // a grayscale or near-flat image. Fall back to the channel average.
+        // Nothing carries enough contrast to tell the candidates apart, so
+        // the image is grayscale or near flat. Fall back to the channel
+        // average.
         return equal_weights;
     }
 
@@ -899,9 +897,9 @@ where
 /// matched pair per grid sample, plus the horizontal and vertical neighbors of
 /// a grid half as fine.
 ///
-/// The random pairs supply the long range contrasts that a purely local
-/// objective misses — two regions that never touch but must still be told
-/// apart — while the neighbor pairs keep local detail from being flattened.
+/// The random pairs supply long range contrasts that a purely local objective
+/// misses, between regions that never touch but must still be told apart. The
+/// neighbor pairs keep local detail from being flattened.
 fn sample_pairs<P>(image: &Image<P>, options: FastDecolorizeOptions) -> Vec<Pair>
 where
     P: Pixel,
@@ -1191,7 +1189,7 @@ mod tests {
 
     #[test]
     fn fast_variant_preserves_brightness() {
-        // The candidate weights are convex, so a flat colour maps onto a
+        // The candidate weights are convex, so a flat color maps onto a
         // weighted average of its own channels and stays in range.
         let image = RgbImage::from_pixel(64, 64, Rgb([90, 90, 90]));
         let gray = decolorize_fast(&image);
@@ -1295,7 +1293,7 @@ mod tests {
 
     #[test]
     fn downscaling_averages_rather_than_samples() {
-        // A one pixel checkerboard averages to mid grey; point sampling would
+        // A one pixel checkerboard averages to mid gray; point sampling would
         // return one of the two extremes instead.
         let checker: RgbImage = ImageBuffer::from_fn(64, 64, |x, y| {
             if (x + y) % 2 == 0 {

@@ -1,12 +1,8 @@
 //! Contrast preserving decolorization.
 //!
-//! This crate is a staging area for a module intended to be upstreamed into
-//! [`imageproc`]. The whole implementation lives in [`decolorize`], which only
-//! depends on `image`, `nalgebra` and (optionally) `rayon` — exactly the
-//! dependencies `imageproc` already has — so the file can be moved across
-//! unchanged.
-//!
-//! [`imageproc`]: https://docs.rs/imageproc
+//! Converts color images to grayscale while preserving the contrast between
+//! colors that ordinary luminance conversions flatten out. See [`decolorize`]
+//! for the algorithm and the entry points.
 #![deny(missing_docs)]
 
 pub mod decolorize;
