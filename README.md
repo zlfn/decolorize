@@ -8,7 +8,7 @@ that ordinary luminance conversions flatten out.
 ## Usage
 
 ```rust
-use decolorize::decolorize::{decolorize, decolorize_fast};
+use decolorize::{decolorize, decolorize_fast};
 
 let gray = decolorize(&image);       // fits a degree-2 polynomial mapping
 let gray = decolorize_fast(&image);  // picks the best of 66 channel weightings

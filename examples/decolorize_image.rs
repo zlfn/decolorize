@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use decolorize::decolorize::{DecolorizeOptions, decolorize_fast, decolorize_with};
+use decolorize::{DecolorizeOptions, decolorize_fast, decolorize_with};
 use image::{DynamicImage, ImageReader};
 
 fn main() {
