@@ -153,8 +153,7 @@ macro_rules! impl_integral_subpixel {
             #[inline]
             fn from_unit(value: f64) -> Self {
                 let max = f64::from(<$t>::MAX);
-                // Saturating, and a non-finite input lands on zero rather than
-                // trapping.
+                // A non-finite value lands on zero rather than trapping.
                 (value * max).round().clamp(0.0, max) as $t
             }
         }
@@ -678,7 +677,7 @@ fn accumulate_pairs(
 
 /// Solves for the polynomial coefficients by fixed point iteration.
 fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIALS] {
-    // ω⁰ = { 0.33, 0.33, 0.33, 0, … }, the plain channel average.
+    // ω⁰ = { ⅓, ⅓, ⅓, 0, … }, the plain channel average.
     let mut weights = [0.0; NUM_MONOMIALS];
     weights[0] = 1.0 / 3.0;
     weights[1] = 1.0 / 3.0;
@@ -831,7 +830,8 @@ where
 /// `1 / WEIGHT_STEPS`.
 const WEIGHT_STEPS: u32 = 10;
 
-/// The 66 candidate weight triples, every `(i, j, k) / 10` with `i + j + k = 10`.
+/// Every weight triple on the quantized simplex, 66 of them for the default
+/// ten steps.
 fn candidate_weights() -> Vec<[f64; 3]> {
     let steps = f64::from(WEIGHT_STEPS);
     let mut candidates = Vec::with_capacity(66);
@@ -1326,6 +1326,12 @@ mod tests {
         let small = RgbImage::from_pixel(30, 20, Rgb([10, 20, 30]));
         let planes = Planes::downscale(&small, 800);
         assert_eq!((planes.width, planes.height), (30, 20));
+
+        // Neither side is scaled below one pixel, so an extreme aspect ratio
+        // overshoots the bound by one.
+        let sliver = RgbImage::from_pixel(100_000, 10, Rgb([10, 20, 30]));
+        let planes = Planes::downscale(&sliver, 800);
+        assert_eq!((planes.width, planes.height), (800, 1));
     }
 
     #[test]
