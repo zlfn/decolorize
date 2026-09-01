@@ -1,5 +1,8 @@
 //! Decolorizes images with both variants and reports the time each took.
 //!
+//! Also writes `image`'s own `to_luma8` conversion as a baseline to compare
+//! against.
+//!
 //! ```text
 //! cargo run --release --example decolorize_image -- OUT_DIR IMAGE [IMAGE ...]
 //! ```
@@ -11,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use decolorize::decolorize::{DecolorizeOptions, decolorize_fast, decolorize_with};
-use image::ImageReader;
+use image::{DynamicImage, ImageReader};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -48,6 +51,10 @@ fn main() {
 
         cpd.save(out_dir.join(format!("{stem}_cpd.png"))).unwrap();
         fast.save(out_dir.join(format!("{stem}_fast.png"))).unwrap();
+        DynamicImage::ImageRgb8(image)
+            .to_luma8()
+            .save(out_dir.join(format!("{stem}_luma.png")))
+            .unwrap();
 
         println!("{stem}: {width}x{height}  cpd {cpd_time:>8.1?}  fast {fast_time:>8.1?}");
     }

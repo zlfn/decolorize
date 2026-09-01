@@ -7,6 +7,12 @@ that differ only in chrominance collapse onto the same gray. This crate
 implements the algorithm that instead fits the global mapping which best
 reproduces the *contrast* of every neighboring pixel pair.
 
+![Comparison on Monet's Impression, Sunrise](comparison.png)
+
+Monet's sun sits at almost exactly the luminance of the sky behind it, so
+`image`'s own conversion erases it. Both variants here recover it, and the
+polynomial one tracks `cv::decolor`, the authors' own implementation.
+
 |                  | `decolorize`                                | `decolorize_fast`                       |
 | ---------------- | ------------------------------------------- | --------------------------------------- |
 | Paper            | ICCP 2012 / IJCV 2014                       | SIGGRAPH Asia 2012 Technical Brief       |
