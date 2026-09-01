@@ -1,5 +1,9 @@
 # decolorize
 
+[![Crates.io Version](https://img.shields.io/crates/v/decolorize?style=for-the-badge&logo=rust&color=dea584&link=https%3A%2F%2Fdocs.rs%2Fdecolorize%2Flatest%2Fgb%2F)](https://crates.io/crates/decolorize)
+[![docs.rs](https://img.shields.io/docsrs/decolorize?style=for-the-badge&logo=docsdotrs&color=%23000000&link=https%3A%2F%2Fdocs.rs%2Fdecolorize%2Flatest%2Fgb%2F)](https://docs.rs/decolorize)
+[![Crates.io License](https://img.shields.io/crates/l/decolorize?style=for-the-badge&logo=opensourceinitiative&logoColor=white&color=3DA639)](https://github.com/zlfn/decolorize/blob/main/LICENSE)
+
 Converts color images to grayscale while preserving the contrast between colors
 that ordinary luminance conversions flatten out.
 
