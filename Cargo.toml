@@ -1,0 +1,25 @@
+[package]
+name = "decolorize"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87.0"
+license = "MIT"
+description = "Contrast preserving decolorization (Lu, Xu & Jia), staged for upstreaming into imageproc"
+
+# Dependency set and feature layout deliberately mirror imageproc 0.28 so that
+# `src/decolorize.rs` can be dropped into that crate unchanged.
+[features]
+default = ["rayon", "image/default"]
+rayon = ["dep:rayon", "image/rayon"]
+
+[dependencies]
+image = { version = "0.25.8", default-features = false }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+num = { version = "0.4.0", default-features = false }
+rayon = { version = "1.10.0", optional = true, default-features = false }
+
+[dev-dependencies]
+image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,5 @@
+# Local development pin only — not part of what gets upstreamed.
+# imageproc declares rust-version = 1.87, but nalgebra 0.35 needs 1.89, so the
+# effective floor is higher than the manifest suggests.
+[toolchain]
+channel = "1.93.1"
