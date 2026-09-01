@@ -1,7 +1,7 @@
 //! Decolorizes images with both variants and reports the time each took.
 //!
 //! Also writes `image`'s own `to_luma8` conversion as a baseline to compare
-//! against.
+//! against. Images with an alpha channel keep it, and decolorize to `LumaA`.
 //!
 //! ```text
 //! cargo run --release --example decolorize_image -- OUT_DIR IMAGE [IMAGE ...]
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use decolorize::{DecolorizeOptions, decolorize_fast, decolorize_with};
-use image::{DynamicImage, ImageReader};
+use image::ImageReader;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -31,27 +31,49 @@ fn main() {
 
     for path in args {
         let path = Path::new(&path);
-        let image = ImageReader::open(path)
+        let decoded = ImageReader::open(path)
             .and_then(|r| r.with_guessed_format())
             .expect("could not open image")
             .decode()
-            .expect("could not decode image")
-            .to_rgb8();
+            .expect("could not decode image");
 
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        let (width, height) = (image.width(), image.height());
+        let (width, height) = (decoded.width(), decoded.height());
+        let cpd_path = out_dir.join(format!("{stem}_cpd.png"));
+        let fast_path = out_dir.join(format!("{stem}_fast.png"));
 
-        let start = Instant::now();
-        let cpd = decolorize_with(&image, options);
-        let cpd_time = start.elapsed();
+        // Encoding is deliberately outside the timers.
+        let (cpd_time, fast_time) = if decoded.color().has_alpha() {
+            let image = decoded.to_rgba8();
 
-        let start = Instant::now();
-        let fast = decolorize_fast(&image);
-        let fast_time = start.elapsed();
+            let start = Instant::now();
+            let cpd = decolorize_with(&image, options);
+            let cpd_time = start.elapsed();
 
-        cpd.save(out_dir.join(format!("{stem}_cpd.png"))).unwrap();
-        fast.save(out_dir.join(format!("{stem}_fast.png"))).unwrap();
-        DynamicImage::ImageRgb8(image)
+            let start = Instant::now();
+            let fast = decolorize_fast(&image);
+            let fast_time = start.elapsed();
+
+            cpd.save(cpd_path).unwrap();
+            fast.save(fast_path).unwrap();
+            (cpd_time, fast_time)
+        } else {
+            let image = decoded.to_rgb8();
+
+            let start = Instant::now();
+            let cpd = decolorize_with(&image, options);
+            let cpd_time = start.elapsed();
+
+            let start = Instant::now();
+            let fast = decolorize_fast(&image);
+            let fast_time = start.elapsed();
+
+            cpd.save(cpd_path).unwrap();
+            fast.save(fast_path).unwrap();
+            (cpd_time, fast_time)
+        };
+
+        decoded
             .to_luma8()
             .save(out_dir.join(format!("{stem}_luma.png")))
             .unwrap();

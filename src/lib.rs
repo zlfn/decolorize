@@ -20,36 +20,34 @@
 //!
 //! # The model
 //!
-//! Both variants share the same objective. Write `Δg` for the difference of the
-//! output grays of a pixel pair and `δ` for the color contrast of that pair,
-//! measured as the Euclidean distance in CIELAB. Previous methods minimize
-//! `(Δg - δ)²`, which forces a *sign* on `δ`, usually that of the lightness
-//! difference. CPD observes that this sign carries no physical meaning and lets
-//! the optimizer pick it. `Δg` is instead modeled as a mixture of two Gaussians
-//! centered at `+δ` and `-δ`,
+//! Write `Δg` for the difference of the output grays of a pixel pair and `δ`
+//! for the color contrast of that pair, the Euclidean distance in CIELAB. The
+//! sign of `δ` carries no physical meaning, so instead of fixing it in advance
+//! CPD models `Δg` as a mixture of two Gaussians centered at `+δ` and `-δ` and
+//! lets the optimizer choose:
 //!
 //! ```text
 //! E(ω) = - Σ  ln[ α·G(Δg - δ, σ²) + (1 - α)·G(Δg + δ, σ²) ]
 //! ```
 //!
-//! where the *weak color order* `α` collapses the mixture back to a single mode
-//! for the pairs whose order really is unambiguous, namely those where one
-//! color dominates the other in all three channels.
+//! The *weak color order* `α` collapses the mixture to a single mode for the
+//! pairs whose order is unambiguous, namely those where one color dominates the
+//! other in all three channels. [`decolorize_fast`] drops that term.
+//!
+//! # Transparency
+//!
+//! Transparent pixels hold whatever color was left behind them, so they are
+//! weighted out of the objective and out of the final rescaling. Partial alpha
+//! counts in proportion.
 //!
 //! # Relation to `cv::decolor`
 //!
 //! OpenCV ships the authors' own implementation of the polynomial variant.
-//! Across the 24 image benchmark from the project page, the two outputs have a
-//! mean absolute correlation of 0.992.
-//!
-//! The defaults differ in one respect. `cv::decolor` measures convergence with
-//! an energy that omits the weak order weights and reads `σ` where the rest of
-//! the algorithm reads `2σ²`. That energy is much smoother than the objective
-//! being minimized, so its tolerance trips after about three iterations. This
-//! crate evaluates the objective as published and keeps iterating, which
-//! reproduces the coefficient trajectory tabulated in the paper. Contrast
-//! preservation over the benchmark is unaffected: mean CCPR at τ = 15 is 0.83
-//! for both, against 0.73 for a luminance conversion.
+//! Across the 24 image benchmark from the project page the two outputs have a
+//! mean absolute correlation of 0.992. They stop iterating at different points:
+//! `cv::decolor` tests convergence against a smoothed stand-in for the
+//! objective and settles after about three iterations, where this crate uses
+//! the objective as published.
 //!
 //! # References
 //!
@@ -80,7 +78,7 @@
 //! ```
 #![deny(missing_docs)]
 
-use image::{ImageBuffer, Luma, Pixel, Primitive};
+use image::{ImageBuffer, Luma, LumaA, Pixel, Primitive, Rgb, Rgba};
 use nalgebra::{SMatrix, SVector};
 
 #[cfg(feature = "rayon")]
@@ -118,10 +116,16 @@ type Vector9 = SVector<f64, NUM_MONOMIALS>;
 
 mod sealed {
     pub trait Sealed {}
+
     impl Sealed for u8 {}
     impl Sealed for u16 {}
     impl Sealed for f32 {}
     impl Sealed for f64 {}
+
+    impl<T> Sealed for image::Rgb<T> {}
+    impl<T> Sealed for image::Rgba<T> {}
+    impl<T> Sealed for image::Luma<T> {}
+    impl<T> Sealed for image::LumaA<T> {}
 }
 
 /// Subpixel types that these functions accept.
@@ -181,6 +185,58 @@ impl_integral_subpixel!(u16);
 impl_float_subpixel!(f32);
 impl_float_subpixel!(f64);
 
+/// Pixel types these functions accept, and the grayscale type each produces.
+///
+/// Sealed, and implemented for `Rgb`, `Rgba`, `Luma` and `LumaA`, which is
+/// every type `image` implements `Pixel` for.
+pub trait DecolorizePixel: Pixel + sealed::Sealed {
+    /// Grayscale pixel type produced for this input.
+    type Output: Pixel<Subpixel = Self::Subpixel>;
+
+    /// Builds an output pixel from a gray level and the input's alpha.
+    fn gray(value: Self::Subpixel, alpha: Self::Subpixel) -> Self::Output;
+}
+
+macro_rules! impl_decolorize_pixel {
+    ($($t:ty),*) => {
+        $(
+            impl DecolorizePixel for Rgb<$t> {
+                type Output = Luma<$t>;
+                #[inline]
+                fn gray(value: $t, _alpha: $t) -> Luma<$t> {
+                    Luma([value])
+                }
+            }
+
+            impl DecolorizePixel for Luma<$t> {
+                type Output = Luma<$t>;
+                #[inline]
+                fn gray(value: $t, _alpha: $t) -> Luma<$t> {
+                    Luma([value])
+                }
+            }
+
+            impl DecolorizePixel for Rgba<$t> {
+                type Output = LumaA<$t>;
+                #[inline]
+                fn gray(value: $t, alpha: $t) -> LumaA<$t> {
+                    LumaA([value, alpha])
+                }
+            }
+
+            impl DecolorizePixel for LumaA<$t> {
+                type Output = LumaA<$t>;
+                #[inline]
+                fn gray(value: $t, alpha: $t) -> LumaA<$t> {
+                    LumaA([value, alpha])
+                }
+            }
+        )*
+    };
+}
+
+impl_decolorize_pixel!(u8, u16, f32, f64);
+
 /// Options for [`decolorize_with`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecolorizeOptions {
@@ -222,7 +278,8 @@ impl Default for DecolorizeOptions {
 /// Options for [`decolorize_fast_with`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FastDecolorizeOptions {
-    /// Standard deviation σ of the two Gaussian modes. Defaults to `0.05`.
+    /// Width of the two Gaussian modes, entering the score as
+    /// `exp(-(Δg ∓ δ)² / σ²)`. Defaults to `0.05`.
     pub sigma: f64,
     /// Pixel pairs are drawn from a grid holding about `samples²` points.
     /// Defaults to `64`.
@@ -231,8 +288,9 @@ pub struct FastDecolorizeOptions {
     /// search is driven by the pairs that actually carry contrast. Defaults to
     /// `0.05`.
     pub contrast_threshold: f64,
-    /// Seed for the pairing of the randomly matched samples. The default of `0`
-    /// makes the output reproducible; vary it to average over several draws.
+    /// Seed for the pairing of the randomly matched samples. Fixed by default,
+    /// so the output is reproducible; vary it to check how stable the search is
+    /// on a given image.
     pub seed: u64,
 }
 
@@ -252,9 +310,9 @@ impl Default for FastDecolorizeOptions {
 ///
 /// See [`decolorize_with`] for the details.
 #[must_use]
-pub fn decolorize<P>(image: &Image<P>) -> Image<Luma<P::Subpixel>>
+pub fn decolorize<P>(image: &Image<P>) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     decolorize_with(image, DecolorizeOptions::default())
@@ -270,9 +328,7 @@ where
 /// local halos or gradient reversals are introduced.
 ///
 /// Fitting runs on a downscaled copy (see [`DecolorizeOptions::fitting_size`]),
-/// so its cost does not grow with the input. For all but the largest images
-/// that fixed cost dominates, and only beyond a few megapixels does evaluating
-/// the nine term polynomial per pixel take over.
+/// so its cost does not grow with the input.
 ///
 /// # Examples
 ///
@@ -298,9 +354,9 @@ where
 /// Panics if `options.sigma` is not positive, or if `options.fitting_size` is
 /// zero.
 #[must_use]
-pub fn decolorize_with<P>(image: &Image<P>, options: DecolorizeOptions) -> Image<Luma<P::Subpixel>>
+pub fn decolorize_with<P>(image: &Image<P>, options: DecolorizeOptions) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     assert!(options.sigma > 0.0, "sigma must be positive");
@@ -320,9 +376,9 @@ where
 ///
 /// See [`decolorize_fast_with`] for the details.
 #[must_use]
-pub fn decolorize_fast<P>(image: &Image<P>) -> Image<Luma<P::Subpixel>>
+pub fn decolorize_fast<P>(image: &Image<P>) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     decolorize_fast_with(image, FastDecolorizeOptions::default())
@@ -338,11 +394,9 @@ where
 /// evaluated on a fixed size sample of pixel pairs. The best scoring candidate
 /// is applied.
 ///
-/// This is roughly an order of magnitude cheaper than [`decolorize_with`]. The
-/// candidate search reads a fixed number of pixel pairs whatever the image
-/// size, leaving little more than one weighted sum per pixel, so there is no
-/// large fixed cost to amortize. The linear model cannot separate colors that
-/// lie on a common line through the RGB cube, though.
+/// This is roughly an order of magnitude cheaper than [`decolorize_with`], but
+/// the linear model cannot separate colors that lie on a common line through
+/// the RGB cube.
 ///
 /// Because the weights are convex the output needs no rescaling, so unlike
 /// [`decolorize_with`] this function preserves the absolute brightness of the
@@ -370,12 +424,9 @@ where
 ///
 /// Panics if `options.sigma` is not positive, or if `options.samples` is zero.
 #[must_use]
-pub fn decolorize_fast_with<P>(
-    image: &Image<P>,
-    options: FastDecolorizeOptions,
-) -> Image<Luma<P::Subpixel>>
+pub fn decolorize_fast_with<P>(image: &Image<P>, options: FastDecolorizeOptions) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     assert!(options.sigma > 0.0, "sigma must be positive");
@@ -393,13 +444,17 @@ where
 // The polynomial variant (ICCP 2012 / IJCV 2014)
 // -------------------------------------------------------------------------
 
-/// A downscaled copy of the input held as three planes on the unit interval.
+/// A downscaled copy of the input held as planes on the unit interval.
 struct Planes {
     width: usize,
     height: usize,
     r: Vec<f64>,
     g: Vec<f64>,
     b: Vec<f64>,
+    /// Mean alpha of the source pixels behind each cell. Colors are averaged
+    /// weighted by it, so a cell that is partly transparent takes its color
+    /// from the part that is actually there.
+    coverage: Vec<f64>,
 }
 
 impl Planes {
@@ -410,7 +465,7 @@ impl Planes {
     /// contrast between pixels that are not adjacent in the original.
     fn downscale<P>(image: &Image<P>, max_extent: u32) -> Self
     where
-        P: Pixel,
+        P: DecolorizePixel,
         P::Subpixel: DecolorizeSubpixel,
     {
         let (source_width, source_height) = (image.width() as usize, image.height() as usize);
@@ -434,10 +489,17 @@ impl Planes {
             r: vec![0.0; width * height],
             g: vec![0.0; width * height],
             b: vec![0.0; width * height],
+            coverage: vec![0.0; width * height],
         };
 
-        type Row<'a> = (usize, ((&'a mut [f64], &'a mut [f64]), &'a mut [f64]));
-        let fill = |(y, ((row_r, row_g), row_b)): Row<'_>| {
+        type Row<'a> = (
+            usize,
+            (
+                ((&'a mut [f64], &'a mut [f64]), &'a mut [f64]),
+                &'a mut [f64],
+            ),
+        );
+        let fill = |(y, (((row_r, row_g), row_b), row_a)): Row<'_>| {
             // Half open source row range covered by output row `y`.
             let y0 = y * source_height / height;
             let y1 = (((y + 1) * source_height).div_ceil(height)).max(y0 + 1);
@@ -445,21 +507,33 @@ impl Planes {
                 let x0 = x * source_width / width;
                 let x1 = (((x + 1) * source_width).div_ceil(width)).max(x0 + 1);
 
-                let (mut r, mut g, mut b) = (0.0, 0.0, 0.0);
+                let (mut r, mut g, mut b, mut a) = (0.0, 0.0, 0.0, 0.0);
                 for sy in y0..y1 {
                     for sx in x0..x1 {
                         let i = (sy * source_width + sx) * channels;
-                        let rgb = P::from_slice(&raw[i..i + channels]).to_rgb();
-                        r += rgb.0[0].to_unit();
-                        g += rgb.0[1].to_unit();
-                        b += rgb.0[2].to_unit();
+                        let rgba = P::from_slice(&raw[i..i + channels]).to_rgba();
+                        let alpha = rgba.0[3].to_unit();
+                        r += rgba.0[0].to_unit() * alpha;
+                        g += rgba.0[1].to_unit() * alpha;
+                        b += rgba.0[2].to_unit() * alpha;
+                        a += alpha;
                     }
                 }
 
                 let count = ((y1 - y0) * (x1 - x0)) as f64;
-                row_r[x] = r / count;
-                row_g[x] = g / count;
-                row_b[x] = b / count;
+                // Undo the premultiplication, leaving the mean color of the
+                // part of the cell that is present. A fully transparent cell
+                // has no color to speak of and is left at zero, but its
+                // coverage keeps it out of the fit entirely.
+                let (scaled_r, scaled_g, scaled_b) = if a > 0.0 {
+                    (r / a, g / a, b / a)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                row_r[x] = scaled_r;
+                row_g[x] = scaled_g;
+                row_b[x] = scaled_b;
+                row_a[x] = a / count;
             }
         };
 
@@ -471,6 +545,7 @@ impl Planes {
             .par_chunks_mut(width)
             .zip(planes.g.par_chunks_mut(width))
             .zip(planes.b.par_chunks_mut(width))
+            .zip(planes.coverage.par_chunks_mut(width))
             .enumerate()
             .for_each(fill);
         #[cfg(not(feature = "rayon"))]
@@ -479,6 +554,7 @@ impl Planes {
             .chunks_mut(width)
             .zip(planes.g.chunks_mut(width))
             .zip(planes.b.chunks_mut(width))
+            .zip(planes.coverage.chunks_mut(width))
             .enumerate()
             .for_each(fill);
 
@@ -491,17 +567,21 @@ impl Planes {
     }
 }
 
-/// Writes the difference `p(x) - p(y)` for every four-neighbor pixel pair into
-/// `out`, horizontal pairs first and vertical pairs second.
+/// Combines the two endpoints of every four-neighbor pixel pair with `f`,
+/// horizontal pairs first and vertical pairs second.
 ///
-/// The color contrasts, the weak orders and the monomial differences all use
-/// this ordering, so they can be indexed in lockstep.
-fn pair_differences(plane: &[f64], width: usize, height: usize, out: &mut [f64]) {
+/// The color contrasts, the weak orders, the monomial differences and the
+/// coverage weights all run through here, which is what keeps them in step:
+/// they are indexed against each other everywhere downstream.
+fn map_pairs<F>(plane: &[f64], width: usize, height: usize, out: &mut [f64], f: F)
+where
+    F: Fn(f64, f64) -> f64,
+{
     let horizontal = width.saturating_sub(1);
     for y in 0..height {
         let row = y * width;
         for x in 0..horizontal {
-            out[y * horizontal + x] = plane[row + x] - plane[row + x + 1];
+            out[y * horizontal + x] = f(plane[row + x], plane[row + x + 1]);
         }
     }
 
@@ -509,9 +589,32 @@ fn pair_differences(plane: &[f64], width: usize, height: usize, out: &mut [f64])
     for y in 0..height.saturating_sub(1) {
         let row = y * width;
         for x in 0..width {
-            out[offset + row + x] = plane[row + x] - plane[row + width + x];
+            out[offset + row + x] = f(plane[row + x], plane[row + width + x]);
         }
     }
+}
+
+/// Writes `p(x) - p(y)` for every four-neighbor pixel pair into `out`.
+fn pair_differences(plane: &[f64], width: usize, height: usize, out: &mut [f64]) {
+    map_pairs(plane, width, height, out, |a, b| a - b);
+}
+
+/// Per-pair weight, the product of the coverage at the two endpoints.
+///
+/// A pair that touches a fully transparent cell drops out of the fit, and a
+/// pair across an antialiased edge counts in proportion to how much of it is
+/// really there. For an opaque image every weight is exactly `1.0`, which
+/// leaves the fit bit for bit what it would be without any of this.
+fn pair_weights(planes: &Planes) -> Vec<f64> {
+    let mut weights = vec![0.0; planes.pair_count()];
+    map_pairs(
+        &planes.coverage,
+        planes.width,
+        planes.height,
+        &mut weights,
+        |a, b| a * b,
+    );
+    weights
 }
 
 /// Per-pair color contrast `|δ|`, the CIELAB distance of the pair scaled so
@@ -609,6 +712,8 @@ struct Accumulator {
     rhs: [f64; NUM_MONOMIALS],
     /// Unnormalized objective `Σ -ln[ α·G(Δg - δ) + (1 - α)·G(Δg + δ) ]`.
     energy: f64,
+    /// Total pair weight behind the two sums above.
+    weight: f64,
 }
 
 impl Accumulator {
@@ -616,6 +721,7 @@ impl Accumulator {
         Self {
             rhs: [0.0; NUM_MONOMIALS],
             energy: 0.0,
+            weight: 0.0,
         }
     }
 
@@ -624,16 +730,19 @@ impl Accumulator {
             *total += part;
         }
         self.energy += other.energy;
+        self.weight += other.weight;
         self
     }
 }
 
 /// Evaluates the objective and the fixed point right hand side over the pairs
 /// `[start, start + len)`.
+#[allow(clippy::too_many_arguments)]
 fn accumulate_pairs(
     basis: &[Vec<f64>],
     contrast: &[f64],
     order: &[f64],
+    pair_weight: &[f64],
     weights: &[f64; NUM_MONOMIALS],
     sigma: f64,
     start: usize,
@@ -643,6 +752,11 @@ fn accumulate_pairs(
     let mut acc = Accumulator::zero();
 
     for i in start..start + len {
+        let coverage = pair_weight[i];
+        if coverage == 0.0 {
+            continue;
+        }
+
         // Δg for this pair under the current mapping.
         let mut difference = 0.0;
         for (weight, row) in weights.iter().zip(basis) {
@@ -666,9 +780,10 @@ fn accumulate_pairs(
         // conditioned.
         let responsibility = (low - high) / (low + high);
 
-        acc.energy -= peak + (low + high).ln();
+        acc.energy -= coverage * (peak + (low + high).ln());
+        acc.weight += coverage;
         for (rhs, row) in acc.rhs.iter_mut().zip(basis) {
-            *rhs += row[i] * delta * responsibility;
+            *rhs += coverage * row[i] * delta * responsibility;
         }
     }
 
@@ -691,6 +806,12 @@ fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIA
     let contrast = color_contrast(planes);
     let order = weak_order(planes);
     let basis = monomial_differences(planes);
+    let pair_weight = pair_weights(planes);
+
+    // A fully transparent image has nothing to fit.
+    if pair_weight.iter().all(|w| *w == 0.0) {
+        return weights;
+    }
 
     // Only the right hand side of the normal equations depends on ω, so the
     // Gram matrix `P Pᵀ` and its factorization are computed once. Forming it
@@ -699,7 +820,12 @@ fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIA
     let mut gram = Matrix9::zeros();
     for i in 0..NUM_MONOMIALS {
         for j in i..NUM_MONOMIALS {
-            let dot: f64 = basis[i].iter().zip(&basis[j]).map(|(a, b)| a * b).sum();
+            let dot: f64 = basis[i]
+                .iter()
+                .zip(&basis[j])
+                .zip(&pair_weight)
+                .map(|((a, b), w)| w * a * b)
+                .sum();
             gram[(i, j)] = dot;
             gram[(j, i)] = dot;
         }
@@ -713,6 +839,7 @@ fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIA
                 &basis,
                 &contrast,
                 &order,
+                &pair_weight,
                 &weights,
                 options.sigma,
                 chunk * PAIR_CHUNK,
@@ -734,7 +861,7 @@ fn fit_weights(planes: &Planes, options: DecolorizeOptions) -> [f64; NUM_MONOMIA
             .into_iter()
             .fold(Accumulator::zero(), Accumulator::merge);
 
-        let energy = total.energy / pairs as f64;
+        let energy = total.energy / total.weight;
         if (energy - previous_energy).abs() <= options.tolerance {
             break;
         }
@@ -768,9 +895,9 @@ fn evaluate(weights: &[f64; NUM_MONOMIALS], r: f64, g: f64, b: f64) -> f64 {
 ///
 /// The polynomial is unconstrained, so its range depends on the image; the
 /// paper's final step maps that range linearly onto the displayable one.
-fn apply_polynomial<P>(image: &Image<P>, weights: &[f64; NUM_MONOMIALS]) -> Image<Luma<P::Subpixel>>
+fn apply_polynomial<P>(image: &Image<P>, weights: &[f64; NUM_MONOMIALS]) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     let channels = P::CHANNEL_COUNT as usize;
@@ -779,12 +906,12 @@ where
     let mut gray = vec![0.0f32; pixels];
 
     let map = |(out, pixel): (&mut f32, &[P::Subpixel])| {
-        let rgb = P::from_slice(pixel).to_rgb();
+        let rgba = P::from_slice(pixel).to_rgba();
         *out = evaluate(
             weights,
-            rgb.0[0].to_unit(),
-            rgb.0[1].to_unit(),
-            rgb.0[2].to_unit(),
+            rgba.0[0].to_unit(),
+            rgba.0[1].to_unit(),
+            rgba.0[2].to_unit(),
         ) as f32;
     };
 
@@ -797,11 +924,23 @@ where
         .zip(raw.chunks_exact(channels))
         .for_each(map);
 
-    let (min, max) = gray
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| {
-            (lo.min(v), hi.max(v))
-        });
+    // Transparent pixels carry whatever color happened to be stored behind
+    // them, which would otherwise stretch the range and flatten everything
+    // visible, so they are left out of it.
+    let (mut min, mut max) = (f32::INFINITY, f32::NEG_INFINITY);
+    if <P as Pixel>::HAS_ALPHA {
+        for (&value, pixel) in gray.iter().zip(raw.chunks_exact(channels)) {
+            if P::from_slice(pixel).to_rgba().0[3].to_unit() > 0.0 {
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+    } else {
+        for &value in &gray {
+            min = min.min(value);
+            max = max.max(value);
+        }
+    }
 
     let range = f64::from(max - min);
     let normalize = |v: f32| -> f64 {
@@ -813,13 +952,33 @@ where
         }
     };
 
-    let data = gray
-        .into_iter()
-        .map(|v| P::Subpixel::from_unit(normalize(v)))
-        .collect();
+    let out_channels = <P::Output as Pixel>::CHANNEL_COUNT as usize;
+    let mut data = vec![P::Subpixel::from_unit(0.0); pixels * out_channels];
+
+    type Slot<'a, S> = ((&'a mut [S], &'a f32), &'a [S]);
+    let write = |((slot, &value), pixel): Slot<'_, P::Subpixel>| {
+        let alpha = if <P as Pixel>::HAS_ALPHA {
+            P::from_slice(pixel).to_rgba().0[3]
+        } else {
+            P::Subpixel::DEFAULT_MAX_VALUE
+        };
+        *<P::Output as Pixel>::from_slice_mut(slot) =
+            P::gray(P::Subpixel::from_unit(normalize(value)), alpha);
+    };
+
+    #[cfg(feature = "rayon")]
+    data.par_chunks_exact_mut(out_channels)
+        .zip(gray.par_iter())
+        .zip(raw.par_chunks_exact(channels))
+        .for_each(write);
+    #[cfg(not(feature = "rayon"))]
+    data.chunks_exact_mut(out_channels)
+        .zip(gray.iter())
+        .zip(raw.chunks_exact(channels))
+        .for_each(write);
 
     ImageBuffer::from_vec(image.width(), image.height(), data)
-        .expect("buffer holds exactly one sample per pixel")
+        .expect("buffer holds exactly one output pixel per input pixel")
 }
 
 // -------------------------------------------------------------------------
@@ -853,6 +1012,9 @@ fn candidate_weights() -> Vec<[f64; 3]> {
 struct Pair {
     difference: [f64; 3],
     contrast: f64,
+    /// Product of the alpha at the two endpoints, so a pair reaching into a
+    /// transparent region does not steer the search.
+    weight: f64,
 }
 
 /// SplitMix64, used only to pair up the sampled pixels.
@@ -878,7 +1040,7 @@ impl SplitMix64 {
 /// Chooses the best of the 66 candidate channel weightings.
 fn search_linear_weights<P>(image: &Image<P>, options: FastDecolorizeOptions) -> [f64; 3]
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     let equal_weights = [1.0 / 3.0; 3];
@@ -893,6 +1055,7 @@ where
     let candidates = candidate_weights();
     let scale = 1.0 / (options.sigma * options.sigma);
 
+    let coverage: f64 = pairs.iter().map(|pair| pair.weight).sum();
     let score = |weights: &[f64; 3]| -> f64 {
         let total: f64 = pairs
             .iter()
@@ -903,10 +1066,10 @@ where
                 let low = -(difference - pair.contrast).powi(2) * scale;
                 let high = -(difference + pair.contrast).powi(2) * scale;
                 let peak = low.max(high);
-                peak + ((low - peak).exp() + (high - peak).exp()).ln()
+                pair.weight * (peak + ((low - peak).exp() + (high - peak).exp()).ln())
             })
             .sum();
-        total / pairs.len() as f64
+        total / coverage
     };
 
     #[cfg(feature = "rayon")]
@@ -936,7 +1099,7 @@ where
 /// neighbor pairs keep local detail from being flattened.
 fn sample_pairs<P>(image: &Image<P>, options: FastDecolorizeOptions) -> Vec<Pair>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     let (width, height) = (image.width() as usize, image.height() as usize);
@@ -952,8 +1115,12 @@ where
 
     let mut pairs = Vec::new();
     let push = |a: (usize, usize), b: (usize, usize), pairs: &mut Vec<Pair>| {
-        let first = image.get_pixel(a.0 as u32, a.1 as u32).to_rgb();
-        let second = image.get_pixel(b.0 as u32, b.1 as u32).to_rgb();
+        let first = image.get_pixel(a.0 as u32, a.1 as u32).to_rgba();
+        let second = image.get_pixel(b.0 as u32, b.1 as u32).to_rgba();
+        let weight = first.0[3].to_unit() * second.0[3].to_unit();
+        if weight == 0.0 {
+            return;
+        }
         let difference = [
             first.0[0].to_unit() - second.0[0].to_unit(),
             first.0[1].to_unit() - second.0[1].to_unit(),
@@ -972,6 +1139,7 @@ where
             pairs.push(Pair {
                 difference,
                 contrast,
+                weight,
             });
         }
     };
@@ -1018,35 +1186,37 @@ where
 
 /// Applies a convex combination of the channels. No rescaling is needed, since
 /// the weights sum to one.
-fn apply_linear<P>(image: &Image<P>, weights: [f64; 3]) -> Image<Luma<P::Subpixel>>
+fn apply_linear<P>(image: &Image<P>, weights: [f64; 3]) -> Image<P::Output>
 where
-    P: Pixel,
+    P: DecolorizePixel,
     P::Subpixel: DecolorizeSubpixel,
 {
     let channels = P::CHANNEL_COUNT as usize;
+    let out_channels = <P::Output as Pixel>::CHANNEL_COUNT as usize;
     let raw = image.as_raw();
     let pixels = image.width() as usize * image.height() as usize;
-    let mut data: Vec<P::Subpixel> = vec![P::Subpixel::from_unit(0.0); pixels];
+    let mut data = vec![P::Subpixel::from_unit(0.0); pixels * out_channels];
 
-    let map = |(out, pixel): (&mut P::Subpixel, &[P::Subpixel])| {
-        let rgb = P::from_slice(pixel).to_rgb();
-        let value = weights[0] * rgb.0[0].to_unit()
-            + weights[1] * rgb.0[1].to_unit()
-            + weights[2] * rgb.0[2].to_unit();
-        *out = P::Subpixel::from_unit(value);
+    let map = |(slot, pixel): (&mut [P::Subpixel], &[P::Subpixel])| {
+        let rgba = P::from_slice(pixel).to_rgba();
+        let value = weights[0] * rgba.0[0].to_unit()
+            + weights[1] * rgba.0[1].to_unit()
+            + weights[2] * rgba.0[2].to_unit();
+        *<P::Output as Pixel>::from_slice_mut(slot) =
+            P::gray(P::Subpixel::from_unit(value), rgba.0[3]);
     };
 
     #[cfg(feature = "rayon")]
-    data.par_iter_mut()
+    data.par_chunks_exact_mut(out_channels)
         .zip(raw.par_chunks_exact(channels))
         .for_each(map);
     #[cfg(not(feature = "rayon"))]
-    data.iter_mut()
+    data.chunks_exact_mut(out_channels)
         .zip(raw.chunks_exact(channels))
         .for_each(map);
 
     ImageBuffer::from_vec(image.width(), image.height(), data)
-        .expect("buffer holds exactly one sample per pixel")
+        .expect("buffer holds exactly one output pixel per input pixel")
 }
 
 // -------------------------------------------------------------------------
@@ -1105,7 +1275,7 @@ fn srgb_to_lab(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Luma, Rgb, RgbImage, Rgba};
+    use image::{ImageBuffer, Luma, LumaA, Rgb, RgbImage, Rgba};
 
     /// Rec. 601 luminance, the conversion `image` itself performs. Used to
     /// construct inputs whose contrast is invisible to a luminance mapping.
@@ -1161,6 +1331,27 @@ mod tests {
     }
 
     #[test]
+    fn pair_weights_line_up_with_the_differences() {
+        // 3 x 2, with the middle of the top row transparent. Every pair that
+        // touches it must be zeroed, and no others, which only holds while the
+        // weights and the differences share one traversal.
+        let planes = Planes {
+            width: 3,
+            height: 2,
+            r: vec![0.0; 6],
+            g: vec![0.0; 6],
+            b: vec![0.0; 6],
+            coverage: vec![1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        };
+
+        assert_eq!(
+            pair_weights(&planes),
+            // horizontal (0,1) (1,2) (3,4) (4,5), then vertical (0,3) (1,4) (2,5)
+            vec![0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
     fn pair_count_covers_every_four_neighbour_pair() {
         for (width, height, expected) in [(1, 1, 0), (2, 1, 1), (1, 2, 1), (3, 2, 7), (4, 4, 24)] {
             let planes = Planes {
@@ -1169,6 +1360,7 @@ mod tests {
                 r: vec![0.0; width * height],
                 g: vec![0.0; width * height],
                 b: vec![0.0; width * height],
+                coverage: vec![1.0; width * height],
             };
             assert_eq!(planes.pair_count(), expected, "{width} x {height}");
         }
@@ -1285,8 +1477,8 @@ mod tests {
 
     #[test]
     fn accepts_pixel_types_other_than_rgb() {
-        // Alpha is ignored, so an opaque RGBA image decolorizes like its RGB
-        // counterpart.
+        // An opaque RGBA image decolorizes to the same grays as its RGB
+        // counterpart, with an alpha channel carried alongside.
         let rgba: Image<Rgba<u8>> = ImageBuffer::from_fn(32, 32, |x, _| {
             if x < 16 {
                 Rgba([251, 0, 0, 255])
@@ -1295,13 +1487,125 @@ mod tests {
             }
         });
         let rgb = two_bands(Rgb([251, 0, 0]), Rgb([0, 128, 0]), 32, 32);
-        assert_eq!(decolorize(&rgba), decolorize(&rgb));
+
+        let with_alpha = decolorize(&rgba);
+        let without = decolorize(&rgb);
+        for (a, b) in with_alpha.pixels().zip(without.pixels()) {
+            assert_eq!(a.0[0], b.0[0]);
+            assert_eq!(a.0[1], 255);
+        }
 
         // A luminance image is already gray and should survive intact.
         let luma: Image<Luma<u8>> = ImageBuffer::from_fn(16, 4, |x, _| Luma([(x * 16) as u8]));
         let gray = decolorize(&luma);
         assert_eq!(gray.get_pixel(0, 0)[0], 0);
         assert_eq!(gray.get_pixel(15, 0)[0], 255);
+    }
+
+    /// Two contrasting visible bands, plus a fully transparent one filled with
+    /// `hidden`.
+    fn padded_with_hidden(hidden: Rgb<u8>) -> Image<Rgba<u8>> {
+        ImageBuffer::from_fn(48, 32, |x, _| match x {
+            0..16 => Rgba([251, 0, 0, 255]),
+            16..32 => Rgba([0, 128, 0, 255]),
+            _ => Rgba([hidden.0[0], hidden.0[1], hidden.0[2], 0]),
+        })
+    }
+
+    #[test]
+    fn transparent_padding_is_as_good_as_not_being_there() {
+        // Every pair touching the transparent strip is weighted out, which
+        // leaves exactly the pairs of the visible part, and the rescaling sees
+        // exactly its pixels. So the visible half has to come out the same as
+        // decolorizing it on its own, to the bit.
+        let cropped: RgbImage = ImageBuffer::from_fn(32, 32, |x, _| {
+            if x < 16 {
+                Rgb([251, 0, 0])
+            } else {
+                Rgb([0, 128, 0])
+            }
+        });
+        let padded = padded_with_hidden(Rgb([255, 255, 255]));
+
+        let expected = decolorize(&cropped);
+        let actual = decolorize(&padded);
+        for (x, y, pixel) in expected.enumerate_pixels() {
+            assert_eq!(pixel.0[0], actual.get_pixel(x, y).0[0], "at {x}, {y}");
+        }
+    }
+
+    #[test]
+    fn what_hides_under_transparent_pixels_does_not_show() {
+        // Same visible content, wildly different colors stored behind the
+        // transparent strip. Neither the fit nor the rescaling may notice.
+        let white = padded_with_hidden(Rgb([255, 255, 255]));
+        let black = padded_with_hidden(Rgb([0, 0, 0]));
+
+        for (a, b) in decolorize(&white).pixels().zip(decolorize(&black).pixels()) {
+            if a.0[1] > 0 {
+                assert_eq!(a.0[0], b.0[0]);
+            }
+        }
+
+        for (a, b) in decolorize_fast(&white)
+            .pixels()
+            .zip(decolorize_fast(&black).pixels())
+        {
+            if a.0[1] > 0 {
+                assert_eq!(a.0[0], b.0[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn transparent_pixels_do_not_eat_the_output_range() {
+        // The hidden white would otherwise pin the top of the range and leave
+        // the visible half compressed into the bottom of it.
+        let image: Image<Rgba<u8>> = ImageBuffer::from_fn(32, 32, |x, _| match x {
+            0..16 => Rgba([251, 0, 0, 255]),
+            16..24 => Rgba([0, 128, 0, 255]),
+            _ => Rgba([255, 255, 255, 0]),
+        });
+
+        let gray = decolorize(&image);
+        let visible: Vec<u8> = gray
+            .pixels()
+            .filter(|p| p.0[1] > 0)
+            .map(|p| p.0[0])
+            .collect();
+        assert_eq!(visible.iter().copied().min(), Some(0));
+        assert_eq!(visible.iter().copied().max(), Some(255));
+        assert!(visible.len() > 1);
+    }
+
+    #[test]
+    fn alpha_survives_both_variants() {
+        let image: Image<Rgba<u8>> =
+            ImageBuffer::from_fn(32, 32, |x, y| Rgba([200, 40, 90, (x * 8 + y) as u8]));
+
+        for gray in [decolorize(&image), decolorize_fast(&image)] {
+            for (x, y, pixel) in gray.enumerate_pixels() {
+                assert_eq!(pixel.0[1], (x * 8 + y) as u8, "alpha at {x}, {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn handles_a_fully_transparent_image() {
+        let image = Image::<Rgba<u8>>::from_pixel(16, 16, Rgba([90, 10, 200, 0]));
+
+        for gray in [decolorize(&image), decolorize_fast(&image)] {
+            assert_eq!(gray.dimensions(), (16, 16));
+            assert!(gray.pixels().all(|p| p.0[1] == 0));
+        }
+    }
+
+    #[test]
+    fn luma_alpha_input_keeps_its_alpha() {
+        let image: Image<LumaA<u8>> =
+            ImageBuffer::from_fn(16, 4, |x, _| LumaA([(x * 16) as u8, 128]));
+        let gray = decolorize(&image);
+        assert!(gray.pixels().all(|p| p.0[1] == 128));
     }
 
     #[test]

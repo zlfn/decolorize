@@ -20,9 +20,9 @@ let gray = decolorize_fast(&image);  // picks the best of 66 channel weightings
 
 `decolorize` reproduces the color contrast most closely; `decolorize_fast` is
 about an order of magnitude cheaper, because it searches a fixed number of pixel
-pairs instead of solving for a mapping. Both take any `image` pixel type (`Rgb`, `Rgba`, `Luma`, …) with `u8`,
-`u16`, `f32` or `f64` samples and return `Image<Luma<_>>` with the same sample
-type.
+pairs instead of solving for a mapping. Both take any `image` pixel type
+(`Rgb`, `Rgba`, `Luma`, `LumaA`) with `u8`, `u16`, `f32` or `f64` samples, and
+return `Luma`, or `LumaA` where the input carries alpha.
 
 `decolorize_with` and `decolorize_fast_with` take an options struct if you need
 to tune σ, the iteration budget or the sampling.
@@ -45,9 +45,10 @@ reference implementation.
   Metrics*][ijcv14] — IJCV 2014. The journal version, which adds the CCPR and
   E-score metrics used to evaluate this port.
 * [*Real-time Contrast Preserving Decolorization*][siga12] — SIGGRAPH Asia 2012
-  Technical Briefs. The algorithm behind `decolorize_fast`: the same objective
-  restricted to convex combinations of the three channels, quantized to 66
-  candidates and scored on a sparse sample of pixel pairs.
+  Technical Briefs. The algorithm behind `decolorize_fast`: the same idea with
+  the weak color order dropped and the mapping restricted to convex
+  combinations of the three channels, quantized to 66 candidates and scored on
+  a sparse sample of pixel pairs.
 
 The authors' own implementation ships in OpenCV as [`cv::decolor`][opencv].
 `decolorize` matches it to a mean absolute correlation of 0.992 across the
