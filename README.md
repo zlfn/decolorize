@@ -3,7 +3,7 @@
 Converts color images to grayscale while preserving the contrast between colors
 that ordinary luminance conversions flatten out.
 
-![Comparison on Monet's Impression, Sunrise](comparison.png)
+![Comparison on Monet's Impression, Sunrise](https://raw.githubusercontent.com/zlfn/decolorize/main/comparison.png)
 
 ## Usage
 
@@ -15,8 +15,8 @@ let gray = decolorize_fast(&image);  // picks the best of 66 channel weightings
 ```
 
 `decolorize` reproduces the color contrast most closely; `decolorize_fast` is
-about an order of magnitude cheaper and its cost barely depends on the image
-size. Both take any `image` pixel type (`Rgb`, `Rgba`, `Luma`, …) with `u8`,
+about an order of magnitude cheaper, because it searches a fixed number of pixel
+pairs instead of solving for a mapping. Both take any `image` pixel type (`Rgb`, `Rgba`, `Luma`, …) with `u8`,
 `u16`, `f32` or `f64` samples and return `Image<Luma<_>>` with the same sample
 type.
 

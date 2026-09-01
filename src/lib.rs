@@ -16,7 +16,7 @@
 //! * [`decolorize_fast`] restricts the model to a convex combination of the
 //!   three channels and picks the best of 66 candidates by exhaustive search on
 //!   a sparse sample of pixel pairs. This is the SIGGRAPH Asia 2012 technical
-//!   brief, and is roughly two orders of magnitude cheaper.
+//!   brief, and is roughly an order of magnitude cheaper.
 //!
 //! # The model
 //!
@@ -38,10 +38,9 @@
 //!
 //! # Relation to `cv::decolor`
 //!
-//! OpenCV ships the authors' own implementation of the polynomial variant. Run
-//! on the benchmark dataset from the project page with the iteration count
-//! pinned to the same value, its nine coefficients and this crate's agree to
-//! within about 0.03.
+//! OpenCV ships the authors' own implementation of the polynomial variant.
+//! Across the 24 image benchmark from the project page, the two outputs have a
+//! mean absolute correlation of 0.992.
 //!
 //! The defaults differ in one respect. `cv::decolor` measures convergence with
 //! an energy that omits the weak order weights and reads `σ` where the rest of
@@ -117,16 +116,29 @@ const PAIR_CHUNK: usize = 8192;
 type Matrix9 = SMatrix<f64, NUM_MONOMIALS, NUM_MONOMIALS>;
 type Vector9 = SVector<f64, NUM_MONOMIALS>;
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for u8 {}
+    impl Sealed for u16 {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+}
+
 /// Subpixel types that these functions accept.
 ///
 /// Implemented for `u8`, `u16`, `f32` and `f64`. Integral samples are taken to
 /// span the unit interval over the whole of their range, floating point samples
 /// to lie in `[0, 1]` already.
-pub trait DecolorizeSubpixel: Primitive + Send + Sync + 'static {
+///
+/// The trait is sealed. Open an issue if you need another sample type.
+pub trait DecolorizeSubpixel: Primitive + Send + Sync + sealed::Sealed + 'static {
     /// Maps a sample onto the unit interval.
     fn to_unit(self) -> f64;
 
-    /// Maps a value on the unit interval back to a sample, saturating.
+    /// Maps a value on the unit interval back to a sample.
+    ///
+    /// Integral types round and saturate. Floating point types pass the value
+    /// through, so an out of range input stays out of range.
     fn from_unit(value: f64) -> Self;
 }
 
@@ -187,9 +199,10 @@ pub struct DecolorizeOptions {
     /// Iteration stops once the energy changes by less than this between
     /// successive iterations. Defaults to `1e-4`.
     pub tolerance: f64,
-    /// The mapping is fitted on a copy of the image downscaled so that
-    /// `width + height` does not exceed this bound; it is then applied at full
-    /// resolution. Defaults to `800`.
+    /// The mapping is fitted on a copy of the image downscaled to roughly this
+    /// bound on `width + height`, then applied at full resolution. Defaults to
+    /// `800`. Neither side is ever scaled below one pixel, so an extreme aspect
+    /// ratio can overshoot the bound by one.
     ///
     /// Fitting cost is quadratic in this value while the result is almost
     /// unaffected, since a global mapping only has nine degrees of freedom.
@@ -239,6 +252,7 @@ impl Default for FastDecolorizeOptions {
 /// default [`DecolorizeOptions`].
 ///
 /// See [`decolorize_with`] for the details.
+#[must_use]
 pub fn decolorize<P>(image: &Image<P>) -> Image<Luma<P::Subpixel>>
 where
     P: Pixel,
@@ -254,9 +268,12 @@ where
 /// rescales the result to the full output range.
 ///
 /// The mapping is global, so equal colors always map to equal grays and no
-/// local halos or gradient reversals are introduced. Fitting is performed on a
-/// downscaled copy (see [`DecolorizeOptions::fitting_size`]), so the cost is
-/// dominated by evaluating a nine term polynomial per pixel.
+/// local halos or gradient reversals are introduced.
+///
+/// Fitting runs on a downscaled copy (see [`DecolorizeOptions::fitting_size`]),
+/// so its cost does not grow with the input. For all but the largest images
+/// that fixed cost dominates, and only beyond a few megapixels does evaluating
+/// the nine term polynomial per pixel take over.
 ///
 /// # Examples
 ///
@@ -279,12 +296,15 @@ where
 ///
 /// # Panics
 ///
-/// Panics if `options.fitting_size` is zero.
+/// Panics if `options.sigma` is not positive, or if `options.fitting_size` is
+/// zero.
+#[must_use]
 pub fn decolorize_with<P>(image: &Image<P>, options: DecolorizeOptions) -> Image<Luma<P::Subpixel>>
 where
     P: Pixel,
     P::Subpixel: DecolorizeSubpixel,
 {
+    assert!(options.sigma > 0.0, "sigma must be positive");
     assert!(options.fitting_size > 0, "fitting_size must be non-zero");
 
     if image.width() == 0 || image.height() == 0 {
@@ -300,6 +320,7 @@ where
 /// default [`FastDecolorizeOptions`].
 ///
 /// See [`decolorize_fast_with`] for the details.
+#[must_use]
 pub fn decolorize_fast<P>(image: &Image<P>) -> Image<Luma<P::Subpixel>>
 where
     P: Pixel,
@@ -313,15 +334,20 @@ where
 ///
 /// Restricts the mapping to `f(r, g, b) = w_r·r + w_g·g + w_b·b` with
 /// non-negative weights summing to one, quantized to multiples of `0.1`. The
-/// resulting 66 candidates are scored by the same bimodal likelihood as
-/// [`decolorize_with`], evaluated on a fixed size sample of pixel pairs, and
-/// the best is applied.
+/// resulting 66 candidates are scored by a bimodal likelihood like the one
+/// [`decolorize_with`] minimizes, though without its weak color order term,
+/// evaluated on a fixed size sample of pixel pairs. The best scoring candidate
+/// is applied.
 ///
-/// This is far cheaper than [`decolorize_with`] and its cost is essentially
-/// independent of the image size, but the linear model cannot separate colors
-/// that lie on a common line through the RGB cube. Because the weights are
-/// convex the output needs no rescaling, so unlike [`decolorize_with`] this
-/// function preserves the absolute brightness of the input.
+/// This is roughly an order of magnitude cheaper than [`decolorize_with`]. The
+/// candidate search reads a fixed number of pixel pairs whatever the image
+/// size, leaving little more than one weighted sum per pixel, so there is no
+/// large fixed cost to amortize. The linear model cannot separate colors that
+/// lie on a common line through the RGB cube, though.
+///
+/// Because the weights are convex the output needs no rescaling, so unlike
+/// [`decolorize_with`] this function preserves the absolute brightness of the
+/// input.
 ///
 /// Contrast is measured as the Euclidean distance in RGB rather than in CIELAB,
 /// following the authors' formulation for this variant.
@@ -343,7 +369,8 @@ where
 ///
 /// # Panics
 ///
-/// Panics if `options.samples` is zero.
+/// Panics if `options.sigma` is not positive, or if `options.samples` is zero.
+#[must_use]
 pub fn decolorize_fast_with<P>(
     image: &Image<P>,
     options: FastDecolorizeOptions,
@@ -352,6 +379,7 @@ where
     P: Pixel,
     P::Subpixel: DecolorizeSubpixel,
 {
+    assert!(options.sigma > 0.0, "sigma must be positive");
     assert!(options.samples > 0, "samples must be non-zero");
 
     if image.width() == 0 || image.height() == 0 {
@@ -580,7 +608,7 @@ fn monomial_differences(planes: &Planes) -> Vec<Vec<f64>> {
 struct Accumulator {
     /// Right hand side `Σ (2β - 1)·lⱼ·δ` of the linearized normal equations.
     rhs: [f64; NUM_MONOMIALS],
-    /// Unnormalized objective `Σ -ln[ α·G(δ) + (1 - α)·G(-δ) ]`.
+    /// Unnormalized objective `Σ -ln[ α·G(Δg - δ) + (1 - α)·G(Δg + δ) ]`.
     energy: f64,
 }
 
@@ -748,7 +776,8 @@ where
 {
     let channels = P::CHANNEL_COUNT as usize;
     let raw = image.as_raw();
-    let mut gray = vec![0.0f32; (image.width() * image.height()) as usize];
+    let pixels = image.width() as usize * image.height() as usize;
+    let mut gray = vec![0.0f32; pixels];
 
     let map = |(out, pixel): (&mut f32, &[P::Subpixel])| {
         let rgb = P::from_slice(pixel).to_rgb();
@@ -798,7 +827,8 @@ where
 // The real-time variant (SIGGRAPH Asia 2012)
 // -------------------------------------------------------------------------
 
-/// Quantization of the weight simplex: weights are multiples of `1 / STEPS`.
+/// Quantization of the weight simplex: weights are multiples of
+/// `1 / WEIGHT_STEPS`.
 const WEIGHT_STEPS: u32 = 10;
 
 /// The 66 candidate weight triples, every `(i, j, k) / 10` with `i + j + k = 10`.
@@ -887,6 +917,7 @@ where
     let best = scores
         .iter()
         .enumerate()
+        .filter(|(_, score)| score.is_finite())
         .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i);
 
@@ -928,8 +959,9 @@ where
             first.0[1].to_unit() - second.0[1].to_unit(),
             first.0[2].to_unit() - second.0[2].to_unit(),
         ];
-        // Normalized by the diameter of the RGB cube, so a contrast of 1 is the
-        // largest one representable.
+        // Scaled by √2, following the authors' reference implementation.
+        // That is not the diameter of the RGB cube, which is √3, so a pair can
+        // score slightly above 1.
         let contrast = (difference[0] * difference[0]
             + difference[1] * difference[1]
             + difference[2] * difference[2])
@@ -993,7 +1025,7 @@ where
 {
     let channels = P::CHANNEL_COUNT as usize;
     let raw = image.as_raw();
-    let pixels = (image.width() * image.height()) as usize;
+    let pixels = image.width() as usize * image.height() as usize;
     let mut data: Vec<P::Subpixel> = vec![P::Subpixel::from_unit(0.0); pixels];
 
     let map = |(out, pixel): (&mut P::Subpixel, &[P::Subpixel])| {
@@ -1024,8 +1056,10 @@ where
 /// D65 white point, as used for the sRGB primaries below.
 const WHITE_POINT: [f64; 3] = [0.950_456, 1.0, 1.088_754];
 
-/// Breakpoint and slope of the linear segment of the CIELAB transfer function.
+/// Breakpoint `ε` below which the CIELAB transfer function is linear.
 const LAB_EPSILON: f64 = 216.0 / 24389.0;
+
+/// Scale `κ` of that linear segment, which runs `(κt + 16) / 116`.
 const LAB_KAPPA: f64 = 24389.0 / 27.0;
 
 /// Inverts the sRGB transfer function.
@@ -1332,7 +1366,7 @@ mod tests {
     #[should_panic(expected = "fitting_size must be non-zero")]
     fn rejects_a_zero_fitting_size() {
         let image = RgbImage::from_pixel(4, 4, Rgb([1, 2, 3]));
-        decolorize_with(
+        let _ = decolorize_with(
             &image,
             DecolorizeOptions {
                 fitting_size: 0,
@@ -1342,10 +1376,38 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "sigma must be positive")]
+    fn rejects_a_non_positive_sigma() {
+        let image = RgbImage::from_pixel(4, 4, Rgb([1, 2, 3]));
+        let _ = decolorize_with(
+            &image,
+            DecolorizeOptions {
+                sigma: 0.0,
+                ..DecolorizeOptions::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sigma must be positive")]
+    fn rejects_a_non_positive_sigma_in_the_fast_variant() {
+        // A zero sigma used to make every candidate score NaN, and the search
+        // then quietly settled on a pure red channel conversion.
+        let image = RgbImage::from_pixel(4, 4, Rgb([1, 2, 3]));
+        let _ = decolorize_fast_with(
+            &image,
+            FastDecolorizeOptions {
+                sigma: 0.0,
+                ..FastDecolorizeOptions::default()
+            },
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "samples must be non-zero")]
     fn rejects_zero_samples() {
         let image = RgbImage::from_pixel(4, 4, Rgb([1, 2, 3]));
-        decolorize_fast_with(
+        let _ = decolorize_fast_with(
             &image,
             FastDecolorizeOptions {
                 samples: 0,

@@ -5,9 +5,14 @@ edition = "2024"
 rust-version = "1.89.0"
 license = "MIT"
 description = "Contrast preserving decolorization (Lu, Xu & Jia)"
+repository = "https://github.com/zlfn/decolorize"
+readme = "README.md"
+keywords = ["image", "grayscale", "decolorization", "contrast", "color"]
+categories = ["multimedia::images", "algorithms"]
+exclude = ["rust-toolchain.toml", "comparison.png"]
 
 [features]
-default = ["rayon", "image/default"]
+default = ["rayon"]
 rayon = ["dep:rayon", "image/rayon"]
 
 [dependencies]
@@ -17,6 +22,3 @@ rayon = { version = "1.10.0", optional = true, default-features = false }
 
 [dev-dependencies]
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"] }
-
-[profile.release]
-opt-level = 3
